@@ -46,7 +46,7 @@
 - k3s args: include `--disable=traefik` to avoid ingress conflicts; add `--tls-san` for `127.0.0.1,localhost,host.docker.internal`.
 - Cluster runtime image: `navigator-cluster-runtime:{version}` built from `rancher/k3s:{version}` with baked AddOn manifests.
 - Manifests directory: `/var/lib/rancher/k3s/server/manifests` (auto-deployed as AddOns).
-- Kubeconfig storage: store cluster kubeconfig under `XDG_CONFIG_HOME/navigator/clusters/{name}_kubeconfig` (fallback to `~/.config`).
+- Kubeconfig storage: store cluster kubeconfig under `XDG_CONFIG_HOME/navigator/clusters/{name}/kubeconfig` (fallback to `~/.config`).
 - Local kubeconfig update: only when explicitly requested via `--update-kube-config` or `navigator cluster admin kubeconfig update`.
 - Local kubeconfig update: only when explicitly requested via `--update-kube-config`.
 - Kubeconfig rewrite: replace `server:` with `https://127.0.0.1:6443`.

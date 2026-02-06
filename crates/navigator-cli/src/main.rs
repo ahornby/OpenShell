@@ -2,8 +2,10 @@
 
 use clap::{CommandFactory, Parser, Subcommand};
 use miette::Result;
+use std::path::PathBuf;
 
 use navigator_cli::run;
+use navigator_cli::tls::{TlsOptions, is_https};
 
 /// Navigator CLI - agent execution and management.
 #[derive(Parser, Debug)]
@@ -19,11 +21,32 @@ struct Cli {
     #[arg(
         long,
         short,
-        default_value = "http://127.0.0.1:8080",
+        default_value = "https://127.0.0.1",
         global = true,
         env = "NAVIGATOR_CLUSTER"
     )]
     cluster: String,
+
+    /// Path to TLS CA certificate (PEM).
+    #[arg(long, env = "NAVIGATOR_TLS_CA", global = true)]
+    tls_ca: Option<PathBuf>,
+
+    /// Path to TLS client certificate (PEM).
+    #[arg(long, env = "NAVIGATOR_TLS_CERT", global = true)]
+    tls_cert: Option<PathBuf>,
+
+    /// Path to TLS client private key (PEM).
+    #[arg(long, env = "NAVIGATOR_TLS_KEY", global = true)]
+    tls_key: Option<PathBuf>,
+
+    /// Allow http:// endpoints even when TLS settings are provided.
+    #[arg(
+        long,
+        env = "NAVIGATOR_ALLOW_INSECURE_ACCESS",
+        default_value_t = false,
+        global = true
+    )]
+    allow_insecure_access: bool,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -157,7 +180,18 @@ enum SandboxCommands {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .map_err(|e| miette::miette!("failed to install rustls crypto provider: {e:?}"))?;
+
     let cli = Cli::parse();
+    let tls = TlsOptions::new(cli.tls_ca, cli.tls_cert, cli.tls_key);
+
+    if !is_https(&cli.cluster)? && !cli.allow_insecure_access {
+        return Err(miette::miette!(
+            "https is required; set NAVIGATOR_CLUSTER=https://... or use --allow-insecure-access"
+        ));
+    }
 
     // Set up logging based on verbosity
     let log_level = match cli.verbose {
@@ -177,7 +211,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Some(Commands::Cluster { command }) => match command {
             ClusterCommands::Status => {
-                run::cluster_status(&cli.cluster).await?;
+                run::cluster_status(&cli.cluster, &tls).await?;
             }
             ClusterCommands::Admin { command } => match command {
                 ClusterAdminCommands::Deploy {
@@ -201,19 +235,19 @@ async fn main() -> Result<()> {
                 keep,
                 command,
             } => {
-                run::sandbox_create(&cli.cluster, sync, keep, &command).await?;
+                run::sandbox_create(&cli.cluster, sync, keep, &command, &tls).await?;
             }
             SandboxCommands::Get { id } => {
-                run::sandbox_get(&cli.cluster, &id).await?;
+                run::sandbox_get(&cli.cluster, &id, &tls).await?;
             }
             SandboxCommands::List { limit, offset, ids } => {
-                run::sandbox_list(&cli.cluster, limit, offset, ids).await?;
+                run::sandbox_list(&cli.cluster, limit, offset, ids, &tls).await?;
             }
             SandboxCommands::Delete { ids } => {
-                run::sandbox_delete(&cli.cluster, &ids).await?;
+                run::sandbox_delete(&cli.cluster, &ids, &tls).await?;
             }
             SandboxCommands::Connect { id } => {
-                run::sandbox_connect(&cli.cluster, &id).await?;
+                run::sandbox_connect(&cli.cluster, &id, &tls).await?;
             }
         },
         Some(Commands::SshProxy {
@@ -221,7 +255,7 @@ async fn main() -> Result<()> {
             sandbox_id,
             token,
         }) => {
-            run::sandbox_ssh_proxy(&gateway, &sandbox_id, &token).await?;
+            run::sandbox_ssh_proxy(&gateway, &sandbox_id, &token, &tls).await?;
         }
         None => {
             Cli::command().print_help().expect("Failed to print help");

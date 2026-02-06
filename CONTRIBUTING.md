@@ -145,6 +145,15 @@ The cluster exposes ports 80/443 for gateway traffic and 6443 for the Kubernetes
 
 Once the cluster is deployed. You can interact with the cluster using standard `nav` CLI commands.
 
+### Gateway mTLS for CLI
+
+When the cluster is configured to terminate TLS at the Gateway with client authentication, the
+CLI needs the generated client certificate bundle. The chart creates a `navigator-cli-client`
+Secret containing `ca.crt`, `tls.crt`, and `tls.key`. During `nav cluster admin deploy`, the
+CLI bundle is automatically copied into `~/.config/navigator/clusters/<name>/mtls`, where
+`<name>` comes from `NAVIGATOR_CLUSTER_NAME` or the host in `NAVIGATOR_CLUSTER` (localhost
+defaults to `navigator`).
+
 ### Docker Build Tasks
 
 ```bash

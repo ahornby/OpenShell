@@ -1,0 +1,249 @@
+use navigator_cli::tls::{TlsOptions, grpc_client};
+use navigator_core::proto::{
+    CreateSshSessionRequest, CreateSshSessionResponse, HealthRequest, HealthResponse,
+    RevokeSshSessionRequest, RevokeSshSessionResponse, ServiceStatus,
+    navigator_server::{Navigator, NavigatorServer},
+};
+use rcgen::{
+    BasicConstraints, Certificate, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair,
+};
+use tempfile::tempdir;
+use tokio::net::TcpListener;
+use tokio_stream::wrappers::TcpListenerStream;
+use tonic::{
+    Response, Status,
+    transport::{Certificate as TlsCertificate, Identity, Server, ServerTlsConfig},
+};
+
+struct EnvVarGuard {
+    key: &'static str,
+    original: Option<String>,
+}
+
+#[allow(unsafe_code)]
+impl EnvVarGuard {
+    fn set(key: &'static str, value: &str) -> Self {
+        let original = std::env::var(key).ok();
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        Self { key, original }
+    }
+}
+
+#[allow(unsafe_code)]
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        if let Some(value) = &self.original {
+            unsafe {
+                std::env::set_var(self.key, value);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+}
+
+fn install_rustls_provider() {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+}
+
+#[derive(Clone, Default)]
+struct TestNavigator;
+
+#[tonic::async_trait]
+impl Navigator for TestNavigator {
+    async fn health(
+        &self,
+        _request: tonic::Request<HealthRequest>,
+    ) -> Result<Response<HealthResponse>, Status> {
+        Ok(Response::new(HealthResponse {
+            status: ServiceStatus::Healthy.into(),
+            version: "test".to_string(),
+        }))
+    }
+
+    async fn create_sandbox(
+        &self,
+        _request: tonic::Request<navigator_core::proto::CreateSandboxRequest>,
+    ) -> Result<Response<navigator_core::proto::SandboxResponse>, Status> {
+        Err(Status::unimplemented(
+            "create_sandbox not implemented in test",
+        ))
+    }
+
+    async fn get_sandbox(
+        &self,
+        _request: tonic::Request<navigator_core::proto::GetSandboxRequest>,
+    ) -> Result<Response<navigator_core::proto::SandboxResponse>, Status> {
+        Err(Status::unimplemented("get_sandbox not implemented in test"))
+    }
+
+    async fn list_sandboxes(
+        &self,
+        _request: tonic::Request<navigator_core::proto::ListSandboxesRequest>,
+    ) -> Result<Response<navigator_core::proto::ListSandboxesResponse>, Status> {
+        Err(Status::unimplemented(
+            "list_sandboxes not implemented in test",
+        ))
+    }
+
+    async fn delete_sandbox(
+        &self,
+        _request: tonic::Request<navigator_core::proto::DeleteSandboxRequest>,
+    ) -> Result<Response<navigator_core::proto::DeleteSandboxResponse>, Status> {
+        Err(Status::unimplemented(
+            "delete_sandbox not implemented in test",
+        ))
+    }
+
+    async fn get_sandbox_policy(
+        &self,
+        _request: tonic::Request<navigator_core::proto::GetSandboxPolicyRequest>,
+    ) -> Result<Response<navigator_core::proto::GetSandboxPolicyResponse>, Status> {
+        Err(Status::unimplemented(
+            "get_sandbox_policy not implemented in test",
+        ))
+    }
+
+    async fn create_ssh_session(
+        &self,
+        _request: tonic::Request<CreateSshSessionRequest>,
+    ) -> Result<Response<CreateSshSessionResponse>, Status> {
+        Err(Status::unimplemented(
+            "create_ssh_session not implemented in test",
+        ))
+    }
+
+    async fn revoke_ssh_session(
+        &self,
+        _request: tonic::Request<RevokeSshSessionRequest>,
+    ) -> Result<Response<RevokeSshSessionResponse>, Status> {
+        Err(Status::unimplemented(
+            "revoke_ssh_session not implemented in test",
+        ))
+    }
+
+    type WatchSandboxStream = tokio_stream::wrappers::ReceiverStream<
+        Result<navigator_core::proto::SandboxStreamEvent, Status>,
+    >;
+
+    async fn watch_sandbox(
+        &self,
+        _request: tonic::Request<navigator_core::proto::WatchSandboxRequest>,
+    ) -> Result<Response<Self::WatchSandboxStream>, Status> {
+        Err(Status::unimplemented(
+            "watch_sandbox not implemented in test",
+        ))
+    }
+}
+
+fn build_ca() -> (Certificate, KeyPair) {
+    let key_pair = KeyPair::generate().unwrap();
+    let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+    params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    let cert = params.self_signed(&key_pair).unwrap();
+    (cert, key_pair)
+}
+
+fn build_server_cert(ca: &Certificate, ca_key: &KeyPair) -> (String, String) {
+    let key_pair = KeyPair::generate().unwrap();
+    let mut params = CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+    params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+    let cert = params.signed_by(&key_pair, ca, ca_key).unwrap();
+    let cert_pem = cert.pem();
+    let key_pem = key_pair.serialize_pem();
+    (cert_pem, key_pem)
+}
+
+fn build_client_cert(ca: &Certificate, ca_key: &KeyPair) -> (String, String) {
+    let key_pair = KeyPair::generate().unwrap();
+    let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+    params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+    let cert = params.signed_by(&key_pair, ca, ca_key).unwrap();
+    let cert_pem = cert.pem();
+    let key_pem = key_pair.serialize_pem();
+    (cert_pem, key_pem)
+}
+
+async fn run_server(
+    server_cert: String,
+    server_key: String,
+    ca_cert: String,
+) -> std::net::SocketAddr {
+    let identity = Identity::from_pem(server_cert, server_key);
+    let client_ca = TlsCertificate::from_pem(ca_cert);
+    let tls = ServerTlsConfig::new()
+        .identity(identity)
+        .client_ca_root(client_ca);
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let incoming = TcpListenerStream::new(listener);
+    tokio::spawn(async move {
+        Server::builder()
+            .tls_config(tls)
+            .unwrap()
+            .add_service(NavigatorServer::new(TestNavigator))
+            .serve_with_incoming(incoming)
+            .await
+            .unwrap();
+    });
+
+    addr
+}
+
+#[tokio::test]
+async fn cli_connects_with_client_cert() {
+    install_rustls_provider();
+
+    let (ca, ca_key) = build_ca();
+    let (server_cert, server_key) = build_server_cert(&ca, &ca_key);
+    let (client_cert, client_key) = build_client_cert(&ca, &ca_key);
+    let ca_cert = ca.pem();
+
+    let addr = run_server(server_cert, server_key, ca_cert.clone()).await;
+
+    let dir = tempdir().unwrap();
+    let ca_path = dir.path().join("ca.crt");
+    let cert_path = dir.path().join("tls.crt");
+    let key_path = dir.path().join("tls.key");
+    std::fs::write(&ca_path, ca_cert).unwrap();
+    std::fs::write(&cert_path, client_cert).unwrap();
+    std::fs::write(&key_path, client_key).unwrap();
+
+    let tls = TlsOptions::new(Some(ca_path), Some(cert_path), Some(key_path));
+    let endpoint = format!("https://localhost:{}", addr.port());
+    let mut client = grpc_client(&endpoint, &tls).await.unwrap();
+    let response = client.health(HealthRequest {}).await.unwrap();
+    assert_eq!(response.get_ref().status, ServiceStatus::Healthy as i32);
+}
+
+#[tokio::test]
+async fn cli_requires_client_cert_for_https() {
+    install_rustls_provider();
+
+    let (ca, ca_key) = build_ca();
+    let (server_cert, server_key) = build_server_cert(&ca, &ca_key);
+    let ca_cert = ca.pem();
+
+    let addr = run_server(server_cert, server_key, ca_cert.clone()).await;
+
+    let dir = tempdir().unwrap();
+    let cluster_name = dir
+        .path()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let _env = EnvVarGuard::set("NAVIGATOR_CLUSTER_NAME", &cluster_name);
+    let ca_path = dir.path().join("ca.crt");
+    std::fs::write(&ca_path, ca_cert).unwrap();
+
+    let tls = TlsOptions::new(Some(ca_path), None, None);
+    let endpoint = format!("https://localhost:{}", addr.port());
+    let result = grpc_client(&endpoint, &tls).await;
+    assert!(result.is_err());
+}

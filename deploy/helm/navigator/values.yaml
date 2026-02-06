@@ -57,4 +57,12 @@ gateway:
   enabled: true
   name: navigator-gateway
   className: envoy-gateway
+  createGatewayClass: true
   listenerPort: 8080
+  tls:
+    enabled: false
+    secretName: navigator-gateway-tls
+    clientCaSecretName: navigator-gateway-client-ca
+    cliSecretName: navigator-cli-client
+    listenerPort: 443
+    jobImage: alpine:3.20

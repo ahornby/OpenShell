@@ -170,7 +170,7 @@ The `navigator-bootstrap` crate handles cluster lifecycle:
    - Extra host: `host.docker.internal:host-gateway` (for DNS resolution)
    - k3s args: `--disable=traefik --tls-san=127.0.0.1,localhost,host.docker.internal`
 4. **Kubeconfig extraction** - Waits for k3s to generate kubeconfig, rewrites server URL to `127.0.0.1:6443`
-5. **Kubeconfig storage** - Saves to `~/.config/navigator/clusters/{name}_kubeconfig`
+5. **Kubeconfig storage** - Saves to `~/.config/navigator/clusters/{name}/kubeconfig`
 
 ### Kubeconfig Management
 
@@ -178,7 +178,7 @@ The CLI manages kubeconfig files:
 
 | Location                                         | Purpose                             |
 | ------------------------------------------------ | ----------------------------------- |
-| `~/.config/navigator/clusters/{name}_kubeconfig` | Stored cluster config               |
+| `~/.config/navigator/clusters/{name}/kubeconfig` | Stored cluster config               |
 | `$KUBECONFIG` or `~/.kube/config`                | Updated with `--update-kube-config` |
 
 The `--update-kube-config` flag merges the cluster's kubeconfig into your local config, setting context/cluster/user entries without overwriting unrelated entries.

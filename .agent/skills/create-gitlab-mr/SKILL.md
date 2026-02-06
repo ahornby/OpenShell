@@ -114,8 +114,6 @@ glab mr create --title "MR title" --description "MR description"
 Every MR **must** have:
 
 1. **Assignee** - Always assign to yourself
-2. **Reviewer** - Request review from the component PIC(s)
-3. **Milestone** - Set the target release milestone
 
 ## Assignee and Reviewer
 
@@ -141,7 +139,6 @@ Use `Closes #<issue-number>` in the description to auto-close the issue when mer
 glab mr create \
   --title "Fix validation error for empty requests" \
   --assignee "your-username" \
-  --reviewer "jdoe" \
   --description "Closes #123
 
 ## Summary
@@ -200,7 +197,6 @@ USERNAME=$(glab api user | jq -r '.username')
 glab mr create \
   --title "feat(files): add pagination to dataset list endpoint" \
   --assignee "$USERNAME" \
-  --reviewer "jdoe" \
   --milestone "Platform 26.02" \
   --description "Closes #456
 

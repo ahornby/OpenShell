@@ -24,6 +24,10 @@ RUN mkdir -p /var/lib/rancher/k3s/agent/images \
 COPY deploy/docker/cluster-entrypoint.sh /usr/local/bin/cluster-entrypoint.sh
 RUN chmod +x /usr/local/bin/cluster-entrypoint.sh
 
+# Copy healthcheck script that verifies cluster readiness
+COPY deploy/docker/cluster-healthcheck.sh /usr/local/bin/cluster-healthcheck.sh
+RUN chmod +x /usr/local/bin/cluster-healthcheck.sh
+
 # Copy pre-built image tarballs for airgap deployment
 # These are created by the docker:build:cluster mise task using docker save
 COPY deploy/docker/.build/images/*.tar /var/lib/rancher/k3s/agent/images/
@@ -37,3 +41,6 @@ COPY deploy/kube/manifests/*.yaml /opt/navigator/manifests/
 
 # Use custom entrypoint that configures DNS before starting k3s
 ENTRYPOINT ["/usr/local/bin/cluster-entrypoint.sh"]
+
+HEALTHCHECK --interval=5s --timeout=5s --start-period=20s --retries=60 \
+  CMD ["/usr/local/bin/cluster-healthcheck.sh"]

@@ -1,9 +1,9 @@
 //! SSH connection and proxy utilities.
 
+use crate::tls::{TlsOptions, build_rustls_config, grpc_client, require_tls_materials};
 use miette::{IntoDiagnostic, Result, WrapErr};
-use navigator_core::proto::{CreateSshSessionRequest, navigator_client::NavigatorClient};
+use navigator_core::proto::CreateSshSessionRequest;
 use rustls::pki_types::ServerName;
-use rustls::{ClientConfig, RootCertStore};
 use std::io::{IsTerminal, Write};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
@@ -13,16 +13,13 @@ use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
-use webpki_roots::TLS_SERVER_ROOTS;
 
 struct SshSessionConfig {
     proxy_command: String,
 }
 
-async fn ssh_session_config(server: &str, id: &str) -> Result<SshSessionConfig> {
-    let mut client = NavigatorClient::connect(server.to_string())
-        .await
-        .into_diagnostic()?;
+async fn ssh_session_config(server: &str, id: &str, tls: &TlsOptions) -> Result<SshSessionConfig> {
+    let mut client = grpc_client(server, tls).await?;
     let response = client
         .create_ssh_session(CreateSshSessionRequest {
             sandbox_id: id.to_string(),
@@ -63,8 +60,8 @@ fn ssh_base_command(proxy_command: &str) -> Command {
 }
 
 /// Connect to a sandbox via SSH.
-pub async fn sandbox_connect(server: &str, id: &str) -> Result<()> {
-    let session = ssh_session_config(server, id).await?;
+pub async fn sandbox_connect(server: &str, id: &str, tls: &TlsOptions) -> Result<()> {
+    let session = ssh_session_config(server, id, tls).await?;
 
     let mut command = ssh_base_command(&session.proxy_command);
     command
@@ -99,12 +96,18 @@ pub async fn sandbox_connect(server: &str, id: &str) -> Result<()> {
 }
 
 /// Execute a command in a sandbox via SSH.
-pub async fn sandbox_exec(server: &str, id: &str, command: &[String], tty: bool) -> Result<()> {
+pub async fn sandbox_exec(
+    server: &str,
+    id: &str,
+    command: &[String],
+    tty: bool,
+    tls: &TlsOptions,
+) -> Result<()> {
     if command.is_empty() {
         return Err(miette::miette!("no command provided"));
     }
 
-    let session = ssh_session_config(server, id).await?;
+    let session = ssh_session_config(server, id, tls).await?;
     let mut ssh = ssh_base_command(&session.proxy_command);
 
     if tty {
@@ -147,12 +150,13 @@ pub async fn sandbox_rsync(
     id: &str,
     repo_root: &Path,
     files: &[String],
+    tls: &TlsOptions,
 ) -> Result<()> {
     if files.is_empty() {
         return Ok(());
     }
 
-    let session = ssh_session_config(server, id).await?;
+    let session = ssh_session_config(server, id, tls).await?;
 
     let ssh_command = format!(
         "ssh -o {} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o GlobalKnownHostsFile=/dev/null",
@@ -212,7 +216,12 @@ fn shell_escape(value: &str) -> String {
 }
 
 /// Run the SSH proxy, connecting stdin/stdout to the gateway.
-pub async fn sandbox_ssh_proxy(gateway_url: &str, sandbox_id: &str, token: &str) -> Result<()> {
+pub async fn sandbox_ssh_proxy(
+    gateway_url: &str,
+    sandbox_id: &str,
+    token: &str,
+    tls: &TlsOptions,
+) -> Result<()> {
     let url: url::Url = gateway_url
         .parse()
         .into_diagnostic()
@@ -228,7 +237,7 @@ pub async fn sandbox_ssh_proxy(gateway_url: &str, sandbox_id: &str, token: &str)
     let connect_path = url.path();
 
     let mut stream: Box<dyn ProxyStream> =
-        connect_gateway(scheme, gateway_host, gateway_port).await?;
+        connect_gateway(scheme, gateway_host, gateway_port, tls).await?;
 
     let request = format!(
         "CONNECT {connect_path} HTTP/1.1\r\nHost: {gateway_host}\r\nX-Sandbox-Id: {sandbox_id}\r\nX-Sandbox-Token: {token}\r\n\r\n"
@@ -258,14 +267,16 @@ pub async fn sandbox_ssh_proxy(gateway_url: &str, sandbox_id: &str, token: &str)
     Ok(())
 }
 
-async fn connect_gateway(scheme: &str, host: &str, port: u16) -> Result<Box<dyn ProxyStream>> {
+async fn connect_gateway(
+    scheme: &str,
+    host: &str,
+    port: u16,
+    tls: &TlsOptions,
+) -> Result<Box<dyn ProxyStream>> {
     let tcp = TcpStream::connect((host, port)).await.into_diagnostic()?;
     if scheme.eq_ignore_ascii_case("https") {
-        let mut root_store = RootCertStore::empty();
-        root_store.extend(TLS_SERVER_ROOTS.iter().cloned());
-        let config = ClientConfig::builder()
-            .with_root_certificates(root_store)
-            .with_no_client_auth();
+        let materials = require_tls_materials(&format!("https://{host}:{port}"), tls)?;
+        let config = build_rustls_config(&materials)?;
         let connector = TlsConnector::from(Arc::new(config));
         let server_name = ServerName::try_from(host.to_string())
             .map_err(|_| miette::miette!("invalid server name: {host}"))?;

@@ -1,9 +1,11 @@
 //! CLI command implementations.
 
+use crate::tls::{TlsOptions, build_rustls_config, grpc_client, require_tls_materials};
 use bytes::Bytes;
 use futures::StreamExt;
 use http_body_util::Full;
 use hyper::{Request, StatusCode};
+use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::{client::legacy::Client, rt::TokioExecutor};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use miette::{IntoDiagnostic, Result, WrapErr};
@@ -13,7 +15,7 @@ use navigator_bootstrap::{
 use navigator_core::proto::{
     CreateSandboxRequest, DeleteSandboxRequest, GetSandboxRequest, HealthRequest,
     LandlockCompatibility, ListSandboxesRequest, NetworkMode, Sandbox, SandboxPhase, SandboxPolicy,
-    SandboxSpec, WatchSandboxRequest, navigator_client::NavigatorClient,
+    SandboxSpec, WatchSandboxRequest,
 };
 use owo_colors::OwoColorize;
 use serde::{Deserialize, Serialize};
@@ -143,13 +145,13 @@ fn format_phase_label(phase: &str) -> String {
 
 /// Show cluster status.
 #[allow(clippy::branches_sharing_code)]
-pub async fn cluster_status(server: &str) -> Result<()> {
+pub async fn cluster_status(server: &str, tls: &TlsOptions) -> Result<()> {
     println!("{}", "Server Status".bold().cyan());
     println!();
     println!("  {} {}", "Server:".dimmed(), server);
 
     // Try to connect and get health
-    match NavigatorClient::connect(server.to_string()).await {
+    match grpc_client(server, tls).await {
         Ok(mut client) => match client.health(HealthRequest {}).await {
             Ok(response) => {
                 let health = response.into_inner();
@@ -157,7 +159,7 @@ pub async fn cluster_status(server: &str) -> Result<()> {
                 println!("  {} {}", "Version:".dimmed(), health.version);
             }
             Err(e) => {
-                if let Some(status) = http_health_check(server).await? {
+                if let Some(status) = http_health_check(server, tls).await? {
                     if status.is_success() {
                         println!("  {} {}", "Status:".dimmed(), "Connected (HTTP)".yellow());
                         println!("  {} {}", "HTTP: ".dimmed(), status);
@@ -174,7 +176,7 @@ pub async fn cluster_status(server: &str) -> Result<()> {
             }
         },
         Err(e) => {
-            if let Some(status) = http_health_check(server).await? {
+            if let Some(status) = http_health_check(server, tls).await? {
                 if status.is_success() {
                     println!("  {} {}", "Status:".dimmed(), "Connected (HTTP)".yellow());
                     println!("  {} {}", "HTTP:".dimmed(), status);
@@ -194,9 +196,27 @@ pub async fn cluster_status(server: &str) -> Result<()> {
     Ok(())
 }
 
-async fn http_health_check(server: &str) -> Result<Option<StatusCode>> {
+async fn http_health_check(server: &str, tls: &TlsOptions) -> Result<Option<StatusCode>> {
     let base = server.trim_end_matches('/');
     let uri: hyper::Uri = format!("{base}/healthz").parse().into_diagnostic()?;
+    if uri.scheme_str() == Some("https") {
+        let materials = require_tls_materials(server, tls)?;
+        let tls_config = build_rustls_config(&materials)?;
+        let https = HttpsConnectorBuilder::new()
+            .with_tls_config(tls_config)
+            .https_only()
+            .enable_http1()
+            .build();
+        let client: Client<_, Full<Bytes>> = Client::builder(TokioExecutor::new()).build(https);
+        let req = Request::builder()
+            .method("GET")
+            .uri(uri)
+            .body(Full::new(Bytes::new()))
+            .into_diagnostic()?;
+        let resp = client.request(req).await.into_diagnostic()?;
+        return Ok(Some(resp.status()));
+    }
+
     let client: Client<_, Full<Bytes>> = Client::builder(TokioExecutor::new()).build_http();
     let req = Request::builder()
         .method("GET")
@@ -256,10 +276,9 @@ pub async fn sandbox_create(
     sync: bool,
     keep: bool,
     command: &[String],
+    tls: &TlsOptions,
 ) -> Result<()> {
-    let mut client = NavigatorClient::connect(server.to_string())
-        .await
-        .into_diagnostic()?;
+    let mut client = grpc_client(server, tls).await?;
 
     let policy = load_dev_sandbox_policy()?;
     let request = CreateSandboxRequest {
@@ -401,19 +420,20 @@ pub async fn sandbox_create(
                 let repo_root = git_repo_root()?;
                 let files = git_sync_files(&repo_root)?;
                 if !files.is_empty() {
-                    sandbox_rsync(server, &sandbox_id, &repo_root, &files).await?;
+                    sandbox_rsync(server, &sandbox_id, &repo_root, &files, tls).await?;
                 }
             }
 
             if command.is_empty() {
-                return sandbox_connect(server, &sandbox_id).await;
+                return sandbox_connect(server, &sandbox_id, tls).await;
             }
 
-            let exec_result = sandbox_exec(server, &sandbox_id, command, interactive).await;
+            let exec_result = sandbox_exec(server, &sandbox_id, command, interactive, tls).await;
 
             if !interactive
                 && !keep
-                && let Err(err) = sandbox_delete(server, std::slice::from_ref(&sandbox_id)).await
+                && let Err(err) =
+                    sandbox_delete(server, std::slice::from_ref(&sandbox_id), tls).await
             {
                 if exec_result.is_ok() {
                     return Err(err);
@@ -546,10 +566,8 @@ fn load_dev_sandbox_policy() -> Result<SandboxPolicy> {
 }
 
 /// Fetch a sandbox by id.
-pub async fn sandbox_get(server: &str, id: &str) -> Result<()> {
-    let mut client = NavigatorClient::connect(server.to_string())
-        .await
-        .into_diagnostic()?;
+pub async fn sandbox_get(server: &str, id: &str, tls: &TlsOptions) -> Result<()> {
+    let mut client = grpc_client(server, tls).await?;
 
     let response = client
         .get_sandbox(GetSandboxRequest { id: id.to_string() })
@@ -743,10 +761,14 @@ fn print_sandbox_policy(policy: &SandboxPolicy) {
 }
 
 /// List sandboxes.
-pub async fn sandbox_list(server: &str, limit: u32, offset: u32, ids_only: bool) -> Result<()> {
-    let mut client = NavigatorClient::connect(server.to_string())
-        .await
-        .into_diagnostic()?;
+pub async fn sandbox_list(
+    server: &str,
+    limit: u32,
+    offset: u32,
+    ids_only: bool,
+    tls: &TlsOptions,
+) -> Result<()> {
+    let mut client = grpc_client(server, tls).await?;
 
     let response = client
         .list_sandboxes(ListSandboxesRequest { limit, offset })
@@ -817,10 +839,8 @@ pub async fn sandbox_list(server: &str, limit: u32, offset: u32, ids_only: bool)
 }
 
 /// Delete a sandbox by id.
-pub async fn sandbox_delete(server: &str, ids: &[String]) -> Result<()> {
-    let mut client = NavigatorClient::connect(server.to_string())
-        .await
-        .into_diagnostic()?;
+pub async fn sandbox_delete(server: &str, ids: &[String], tls: &TlsOptions) -> Result<()> {
+    let mut client = grpc_client(server, tls).await?;
 
     for id in ids {
         let response = client

@@ -2409,6 +2409,7 @@ checksum = "1d87ecb2933e8aeadb3e3a02b828fed80a7528047e68b4f424523a0981a3a084"
 name = "navigator-bootstrap"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "bollard",
  "bytes",
  "futures",
@@ -2429,23 +2430,27 @@ dependencies = [
  "futures",
  "http-body-util",
  "hyper",
+ "hyper-rustls",
  "hyper-util",
  "indicatif",
  "miette",
  "navigator-bootstrap",
  "navigator-core",
  "owo-colors",
+ "rcgen",
  "rustls",
+ "rustls-pemfile",
  "serde",
  "serde_yaml",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-rustls",
+ "tokio-stream",
  "tonic",
  "tracing",
  "tracing-subscriber",
  "url",
- "webpki-roots 0.26.11",
 ]
 
 [[package]]

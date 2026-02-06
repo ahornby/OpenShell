@@ -21,7 +21,7 @@ serde_yaml = { workspace = true }
 tokio = { workspace = true }
 
 # gRPC client
-tonic = { workspace = true }
+tonic = { workspace = true, features = ["tls"] }
 
 # CLI
 clap = { workspace = true }
@@ -33,9 +33,10 @@ bytes = { workspace = true }
 http-body-util = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
-tokio-rustls = { workspace = true }
+hyper-rustls = "0.27"
 rustls = { workspace = true }
-webpki-roots = "0.26"
+rustls-pemfile = { workspace = true }
+tokio-rustls = { workspace = true }
 
 # Error handling
 miette = { workspace = true }
@@ -54,3 +55,8 @@ tracing-subscriber = { workspace = true }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+rcgen = { version = "0.13", features = ["crypto", "pem"] }
+tempfile = "3"
+tokio-stream = { workspace = true }

@@ -21,3 +21,7 @@ spec:
       pullPolicy: IfNotPresent
     server:
       sandboxImage: navigator-sandbox:dev
+    gateway:
+      tls:
+        enabled: true
+        listenerPort: 443
