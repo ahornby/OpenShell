@@ -360,7 +360,18 @@ pub fn drop_privileges(policy: &SandboxPolicy) -> Result<()> {
         _ => None,
     };
 
+    // If no user/group is configured and we are running as root, fall back to
+    // "sandbox:sandbox" instead of silently keeping root.  This covers the
+    // local/dev-mode path where policies are loaded from disk and never pass
+    // through the server-side `ensure_sandbox_process_identity` normalization.
+    // For non-root runtimes, the no-op is safe -- we are already unprivileged.
     if user_name.is_none() && group_name.is_none() {
+        if nix::unistd::geteuid().is_root() {
+            let mut fallback = policy.clone();
+            fallback.process.run_as_user = Some("sandbox".into());
+            fallback.process.run_as_group = Some("sandbox".into());
+            return drop_privileges(&fallback);
+        }
         return Ok(());
     }
 
@@ -522,7 +533,15 @@ mod tests {
             run_as_user: None,
             run_as_group: None,
         });
-        assert!(drop_privileges(&policy).is_ok());
+        if nix::unistd::geteuid().is_root() {
+            // As root, drop_privileges falls back to "sandbox:sandbox".
+            // If that user exists, it succeeds; if not (e.g. CI), it
+            // must error rather than silently keep root.
+            let has_sandbox = User::from_name("sandbox").ok().flatten().is_some();
+            assert_eq!(drop_privileges(&policy).is_ok(), has_sandbox);
+        } else {
+            assert!(drop_privileges(&policy).is_ok());
+        }
     }
 
     #[test]
@@ -531,7 +550,12 @@ mod tests {
             run_as_user: Some(String::new()),
             run_as_group: Some(String::new()),
         });
-        assert!(drop_privileges(&policy).is_ok());
+        if nix::unistd::geteuid().is_root() {
+            let has_sandbox = User::from_name("sandbox").ok().flatten().is_some();
+            assert_eq!(drop_privileges(&policy).is_ok(), has_sandbox);
+        } else {
+            assert!(drop_privileges(&policy).is_ok());
+        }
     }
 
     #[test]
